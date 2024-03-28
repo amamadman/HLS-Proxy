@@ -1,4 +1,3 @@
-const request  = require('@warren-bank/node-request').request
 const acl_pass = require('./acl_pass')
 const cookies  = require('./cookies')
 const parser   = require('./manifest_parser')
@@ -15,7 +14,6 @@ const get_middleware = function(params) {
   const is_acl_pass_allowed = acl_pass.is_allowed.bind(null, params)
   const debug               = utils.debug.bind(null, params)
   const parse_req_url       = utils.parse_req_url.bind(null, params)
-  const get_request_options = utils.get_request_options.bind(null, params)
   const modify_m3u8_content = parser.modify_m3u8_content.bind(null, params, segment_cache)
 
   const middleware = {}
@@ -79,42 +77,37 @@ const get_middleware = function(params) {
       }
     }
 
-    const options = get_request_options(url, is_m3u8, referer_url)
+    const fetchOptions = {
+      headers: {
+        'Range': req.headers['range'] || '', // Pass the Range header from the incoming request
+        'Referer': referer_url // Set the Referer header
+      },
+      redirect: 'manual' // Do not automatically follow redirects
+    };
+
     debug(1, 'proxying:', url)
     debug(3, 'm3u8:', (is_m3u8 ? 'true' : 'false'))
 
-    request(options, '', {binary: !is_m3u8, stream: !is_m3u8, cookieJar: cookies.getCookieJar()})
-    .then(({redirects, response}) => {
-      debug(2, 'proxied response:', {status_code: response.statusCode, headers: response.headers, redirects})
+    fetch(url, fetchOptions)
+      .then(async (response) => {
+        debug(2, 'proxied response:', {status_code: response.status, headers: response.headers})
 
-      if (!is_m3u8) {
-        if (response.headers) {
-          const headers = {}
-          for (let header of ['content-type', 'content-length']) {
-            if (response.headers[header])
-              headers[header] = response.headers[header]
-          }
-          res.writeHead(200, headers)
+        if (!is_m3u8) {
+          res.writeHead(response.status, response.headers)
+          response.body.pipe(res)
         }
         else {
-          res.writeHead(200)
+          const m3u8_url = response.url || url
+          const text = await response.text()
+          res.writeHead(response.status, { "content-type": "application/x-mpegURL" })
+          res.end(modify_m3u8_content(text.trim(), m3u8_url, referer_url, redirected_base_url, qs_password))
         }
-        response.pipe(res)
-      }
-      else {
-        const m3u8_url = (redirects && Array.isArray(redirects) && redirects.length)
-          ? redirects[(redirects.length - 1)]
-          : url
-
-        res.writeHead(200, { "content-type": "application/x-mpegURL" })
-        res.end( modify_m3u8_content(response.toString().trim(), m3u8_url, referer_url, redirected_base_url, qs_password) )
-      }
-    })
-    .catch((e) => {
-      debug(0, 'ERROR:', e.message)
-      res.writeHead(500)
-      res.end()
-    })
+      })
+      .catch((e) => {
+        debug(0, 'ERROR:', e.message)
+        res.writeHead(500)
+        res.end()
+      })
   }
 
   timers.initialize_timers(params)
